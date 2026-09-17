@@ -357,9 +357,9 @@ impl InvoiceService {
         // - In-memory locks fail across multi-node/pod deployments.
         // - Optimistic concurrency (e.g. version numbers) creates churn and leaves external PSP state ambivalently committed.
         // - Row-level locking forces concurrent requests for the SAME invoice to wait sequentially.
-        // The first request acquires the lock, observes status == 'open', settles payment, and transitions status to 'paid'.
-        // Subsequent requests acquire the lock immediately after, observe status == 'paid', and are cleanly rejected
-        // with an InvalidStateTransition error without ever contacting the PSP!
+        // A separate key can be rejected with 409 before the PSP call while another
+        // payment operation is unresolved. Once the first request settles, later
+        // requests observe status == 'paid' and receive 422 without a PSP call.
         let invoice = sqlx::query_as::<_, Invoice>(
             r#"
             SELECT * FROM invoices 
@@ -386,8 +386,9 @@ impl InvoiceService {
             .bind(business_id)
             .bind(&request_path)
             .bind(&idempotency_key)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+            tx.commit().await?;
             return Err(AppError::InvalidStateTransition(format!(
                 "Cannot pay invoice: current state is '{}'. Payments can only be processed on 'open' invoices.",
                 invoice.status
@@ -412,8 +413,9 @@ impl InvoiceService {
             .bind(business_id)
             .bind(&request_path)
             .bind(&idempotency_key)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+            tx.commit().await?;
             return Err(AppError::IdempotencyConflict(
                 "A previous payment has an unresolved processor outcome. Retry it with its original Idempotency-Key.".to_string(),
             ));

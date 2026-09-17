@@ -40,7 +40,7 @@ stateDiagram-v2
 
 The payment transaction locks its invoice with `SELECT ... FOR UPDATE`. This is safer here than an in-memory lock (unsafe across replicas) or optimistic locking (which may contact the PSP twice before discovering a conflict). Its trade-off is a bounded five-second downstream call holding an invoice lock; production should monitor contention and apply explicit pool/lock timeouts.
 
-**a. Two simultaneous payments.** The first request locks the open invoice and calls the PSP. A different key waits and, after success, sees `paid` and returns `422` without calling the PSP. The same key cannot call the PSP concurrently. The concurrency test asserts one successful attempt and one PSP call.
+**a. Two simultaneous payments.** The first request locks the open invoice and calls the PSP. A different key may be rejected immediately with `409` while another idempotency claim is unresolved; after settlement, a later request sees `paid` and receives `422`. Either outcome occurs before another PSP call. The same key cannot call the PSP concurrently. The concurrency test asserts one successful attempt and one PSP call.
 
 **b. `tok_timeout`.** A client timeout is an *unknown*, not a decline: the upstream may still finish. The invoice stays `open`; the attempt and idempotency record become `unknown`; the API returns `504`. The caller must retry only with the same key, and another key is rejected until resolution. The mock reserves the key before its simulated charge and retains the successful outcome, so a retry cannot start a second charge.
 

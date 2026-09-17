@@ -81,7 +81,7 @@ curl -i -X POST http://localhost:8080/v1/invoices \
   -H "Content-Type: application/json" \
   -d '{
     "customer_id": "CUSTOMER_ID_HERE",
-    "due_date": "2026-10-01T00:00:00Z",
+    "due_date": "2027-12-31T00:00:00Z",
     "auto_open": true,
     "line_items": [
       {

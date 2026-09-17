@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::errors::AppError;
 
 // We model 5 explicit lifecycle states:
-// - Draft: Created in draft, can be edited or deleted (optional staging).
+// - Draft: Created before it is finalized for collection.
 // - Open: Finalized invoice awaiting payment. Only Open invoices accept payments.
 // - Paid: Terminal state achieved upon successful payment settlement.
 // - Void: Terminal state when merchant cancels an invoice.
@@ -56,16 +56,14 @@ impl InvoiceStatus {
     // - Open -> Uncollectible (bad debt)
     // All other transitions, including transitions out of Paid, Void, and Uncollectible, are rejected.
     pub fn can_transition_to(&self, target: InvoiceStatus) -> bool {
-        match (self, target) {
-            (InvoiceStatus::Draft, InvoiceStatus::Open) => true,
-            (InvoiceStatus::Draft, InvoiceStatus::Void) => true,
-            (InvoiceStatus::Open, InvoiceStatus::Paid) => true,
-            (InvoiceStatus::Open, InvoiceStatus::Void) => true,
-            (InvoiceStatus::Open, InvoiceStatus::Uncollectible) => true,
-            // Self-transition is a no-op or allowed for idempotency
-            (a, b) if a == &b => true,
-            _ => false,
-        }
+        matches!(
+            (self, target),
+            (InvoiceStatus::Draft, InvoiceStatus::Open)
+                | (InvoiceStatus::Draft, InvoiceStatus::Void)
+                | (InvoiceStatus::Open, InvoiceStatus::Paid)
+                | (InvoiceStatus::Open, InvoiceStatus::Void)
+                | (InvoiceStatus::Open, InvoiceStatus::Uncollectible)
+        )
     }
 }
 

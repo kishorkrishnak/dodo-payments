@@ -113,7 +113,10 @@ pub async fn setup_test_context() -> (
 ) {
     let config = AppConfig::from_env();
     let pool = PgPoolOptions::new()
-        .max_connections(10)
+        // Match the application pool. The concurrency test deliberately creates ten
+        // simultaneous requests; reserve headroom for idempotency claims while
+        // other requests hold invoice-lock transactions during the PSP call.
+        .max_connections(20)
         .acquire_timeout(Duration::from_secs(2))
         .connect(&config.database_url)
         .await

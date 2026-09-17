@@ -1,118 +1,150 @@
 mod common;
 
+use axum::{
+    body::Body,
+    extract::FromRef,
+    http::{Request, StatusCode},
+    middleware,
+    routing::post,
+    Router,
+};
 use chrono::Utc;
+use sqlx::PgPool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tower::ServiceExt;
+use uuid::Uuid;
 
-use dodo_payments::models::invoice::{CreateInvoiceRequest, CreateLineItemRequest, Invoice};
-use dodo_payments::models::payment::{PayInvoiceRequest, PaymentAttempt};
+use dodo_payments::models::business::Business;
+use dodo_payments::models::invoice::{CreateInvoiceRequest, CreateLineItemRequest};
+use dodo_payments::routes::{auth::require_api_key, invoices::pay_invoice};
+use dodo_payments::services::invoice_service::InvoiceService;
 
-// REQUIRED TEST 1: Concurrency Test
-// Spec: "One concurrency test that fires N concurrent POST /pay requests for the same invoice
-// and asserts that at most one succeeds, no double-charges occur, and the final state is consistent."
+#[derive(Clone)]
+struct HttpTestState {
+    pool: PgPool,
+    invoice_service: Arc<InvoiceService>,
+}
+
+impl FromRef<HttpTestState> for PgPool {
+    fn from_ref(state: &HttpTestState) -> Self {
+        state.pool.clone()
+    }
+}
+
+impl FromRef<HttpTestState> for Arc<InvoiceService> {
+    fn from_ref(state: &HttpTestState) -> Self {
+        state.invoice_service.clone()
+    }
+}
+
+fn payment_router(state: HttpTestState) -> Router {
+    let api_routes = Router::new()
+        .route("/invoices/{id}/pay", post(pay_invoice))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_api_key,
+        ));
+
+    Router::new().nest("/v1", api_routes).with_state(state)
+}
+
+// REQUIRED TEST 1: HTTP-level acceptance coverage for the exact take-home requirement:
+// POST /pay requests must pass through routing, authentication, header parsing,
+// JSON parsing, the service, PostgreSQL, and the mock PSP.
 #[tokio::test]
-async fn test_concurrent_payments_no_double_charge() {
-    let ctx = common::setup_test_context().await;
-    let (pool, service, psp_counter, business, customer) = ctx;
-
-    // 1. Create an open invoice for $50.00 (5000 cents)
-    let inv_req = CreateInvoiceRequest {
-        customer_id: customer.id,
-        due_date: Utc::now() + chrono::Duration::days(7),
-        line_items: vec![CreateLineItemRequest {
-            description: "Pro Plan Subscription".to_string(),
-            quantity: 1,
-            unit_amount_cents: 5000,
-        }],
-        auto_open: Some(true),
-    };
-    let invoice = service
-        .create_invoice(business.id, inv_req)
+async fn test_concurrent_payment_posts_no_double_charge() {
+    let (pool, service, psp_counter, business, customer) = common::setup_test_context().await;
+    let api_key = format!("dp_http_test_{}", Uuid::new_v4().simple());
+    sqlx::query("UPDATE businesses SET api_key_hash = $1 WHERE id = $2")
+        .bind(Business::hash_api_key(&api_key))
+        .bind(business.id)
+        .execute(&pool)
         .await
-        .expect("Failed to create test invoice");
+        .unwrap();
 
-    assert_eq!(invoice.status, "open");
-    assert_eq!(invoice.total_amount_cents, 5000);
+    let invoice = service
+        .create_invoice(
+            business.id,
+            CreateInvoiceRequest {
+                customer_id: customer.id,
+                due_date: Utc::now() + chrono::Duration::days(7),
+                line_items: vec![CreateLineItemRequest {
+                    description: "HTTP concurrency test".to_string(),
+                    quantity: 1,
+                    unit_amount_cents: 5000,
+                }],
+                auto_open: Some(true),
+            },
+        )
+        .await
+        .unwrap();
 
-    // 2. Fire N concurrent payment attempts at the exact same instant
+    let app = payment_router(HttpTestState {
+        pool: pool.clone(),
+        invoice_service: service,
+    });
     const N: usize = 10;
-    let mut handles = Vec::with_capacity(N);
+    let mut calls = Vec::with_capacity(N);
 
     for i in 0..N {
-        let service_clone = service.clone();
-        let biz_id = business.id;
-        let inv_id = invoice.id;
-        let idemp_key = format!("concurrent_idemp_{}_{}", inv_id, i);
-
-        let handle = tokio::spawn(async move {
-            let req = PayInvoiceRequest {
-                token: "tok_success".to_string(),
-            };
-            let raw_body = serde_json::to_string(&req).unwrap();
-            service_clone
-                .pay_invoice(biz_id, inv_id, req, Some(idemp_key), &raw_body)
-                .await
-        });
-        handles.push(handle);
+        let app = app.clone();
+        let api_key = api_key.clone();
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/v1/invoices/{}/pay", invoice.id))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header(
+                "Idempotency-Key",
+                format!("http-concurrency-{}-{}", invoice.id, i),
+            )
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"token":"tok_success"}"#))
+            .unwrap();
+        calls.push(tokio::spawn(
+            async move { app.oneshot(request).await.unwrap() },
+        ));
     }
 
-    let mut succeeded_count = 0;
-    let mut rejected_count = 0;
-
-    for handle in handles {
-        let res = handle.await.unwrap();
-        match res {
-            Ok(resp) => {
-                assert_eq!(resp.status, "succeeded");
-                assert_eq!(resp.invoice_status, "paid");
-                succeeded_count += 1;
-            }
-            Err(err) => {
-                // Should be rejected due to invalid state transition (already paid)
-                let code = err.error_code();
-                assert_eq!(code, "invalid_state_transition");
-                rejected_count += 1;
+    let mut succeeded = 0;
+    let mut rejected = 0;
+    for call in calls {
+        let response = call.await.unwrap();
+        match response.status() {
+            StatusCode::OK => succeeded += 1,
+            StatusCode::UNPROCESSABLE_ENTITY | StatusCode::CONFLICT => rejected += 1,
+            status => {
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                panic!(
+                    "unexpected concurrent payment HTTP status {status}: {}",
+                    String::from_utf8_lossy(&body)
+                );
             }
         }
     }
 
-    // Assert: Exactly ONE succeeds and N-1 are rejected
-    assert_eq!(
-        succeeded_count, 1,
-        "Exactly one concurrent payment attempt must succeed"
-    );
-    assert_eq!(
-        rejected_count,
-        N - 1,
-        "All other concurrent payment attempts must be rejected"
-    );
+    assert_eq!(succeeded, 1);
+    assert_eq!(rejected, N - 1);
+    assert_eq!(psp_counter.load(Ordering::SeqCst), 1);
 
-    // Assert: Verify database consistency
-    let final_invoice = sqlx::query_as::<_, Invoice>("SELECT * FROM invoices WHERE id = $1")
-        .bind(invoice.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-    assert_eq!(final_invoice.status, "paid");
-
-    let successful_attempts = sqlx::query_as::<_, PaymentAttempt>(
-        "SELECT * FROM payment_attempts WHERE invoice_id = $1 AND status = 'succeeded'",
+    let final_invoice_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM invoices WHERE id = $1 AND business_id = $2",
     )
     .bind(invoice.id)
-    .fetch_all(&pool)
+    .bind(business.id)
+    .fetch_one(&pool)
     .await
     .unwrap();
+    assert_eq!(final_invoice_status, "paid");
 
-    assert_eq!(
-        successful_attempts.len(),
-        1,
-        "There must be exactly one successful payment attempt recorded"
-    );
-
-    // Assert: External PSP was contacted exactly once (no double-charging!)
-    assert_eq!(
-        psp_counter.load(Ordering::SeqCst),
-        1,
-        "PSP must only be called once; no double-charges may occur"
-    );
+    let successful_attempts = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM payment_attempts WHERE invoice_id = $1 AND status = 'succeeded'",
+    )
+    .bind(invoice.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(successful_attempts, 1);
 }
