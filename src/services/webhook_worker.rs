@@ -7,18 +7,20 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-// Webhook delivery is completely decoupled from the synchronous API request path using the
+// Webhook delivery is off the synchronous API request path using the
 // Transactional Outbox Pattern:
-// 1. Handlers write `webhook_events` and `webhook_deliveries` in the same atomic SQL transaction as the state change.
-// 2. Workers atomically lease rows using `FOR UPDATE SKIP LOCKED`; an expired lease supports crash recovery.
+// 1. Invoice creation and payment outcome paths write `webhook_events` and `webhook_deliveries`
+//    in the same atomic SQL transaction as the state change.
+// 2. Workers claim rows using `FOR UPDATE SKIP LOCKED`; an expired lease supports crash recovery.
 // 3. Signing Scheme: HMAC-SHA256 over `${timestamp}.${payload}` in the `X-Webhook-Signature` header (t=...,v1=...)
-//    for cryptographic authenticity and replay attack prevention.
+//    lets receivers verify authenticity. Receivers must enforce a timestamp tolerance and deduplicate
+//    the signed `event_id` in the payload to protect against replay.
 // 4. Retry Backoff Policy:
 //    - Max attempts: 5 retries (total 6 attempts including initial).
 //    - Interval schedule: Attempt 1 (+30s), Attempt 2 (+2m), Attempt 3 (+10m), Attempt 4 (+1h), Attempt 5 (+6h).
 //    - Total budget: ~7.2 hours.
 //    - Terminal failure: Once budget is exhausted, delivery is marked 'failed'.
-//    - Reconciliation: Merchants can poll `GET /v1/webhooks/events` to reconcile any dropped deliveries.
+//    - Reconciliation: Merchants can poll `GET /v1/webhooks/events` to retrieve events after missed notifications.
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -62,8 +64,8 @@ impl WebhookWorker {
     }
 
     async fn process_pending_deliveries(&self) -> Result<(), sqlx::Error> {
-        // Claim deliveries with a lease so separate service replicas cannot deliver
-        // one row concurrently. An expired lease makes crash recovery at-least-once.
+        // Claim one delivery with a lease. While the lease is valid, another replica cannot
+        // claim it; an expired lease enables crash recovery with at-least-once delivery.
         let rows = sqlx::query_as::<_, PendingDeliveryRow>(
             r#"
             WITH candidates AS (
@@ -76,7 +78,7 @@ impl WebhookWorker {
                 )
                 ORDER BY d.next_retry_at ASC
                 FOR UPDATE OF d SKIP LOCKED
-                LIMIT 20
+                LIMIT 1
             ), claimed AS (
                 UPDATE webhook_deliveries d
                 SET status = 'in_progress', lease_expires_at = NOW() + INTERVAL '30 seconds'

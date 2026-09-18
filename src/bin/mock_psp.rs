@@ -40,8 +40,8 @@ pub struct ErrorResponse {
 
 #[derive(Clone)]
 struct MockPspState {
-    // The real PSP contract is idempotent. This in-memory map is sufficient for this
-    // assignment's mock process; a real processor persists this before charging.
+    // This mock emulates provider idempotency in memory. It is sufficient for the
+    // assignment process; a real processor must persist idempotency state before charging.
     outcomes: Arc<Mutex<HashMap<String, MockChargeState>>>,
 }
 

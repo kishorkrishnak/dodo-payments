@@ -189,7 +189,7 @@ cargo test
 ## Deliverables Index
 
 - [`DESIGN.md`](./DESIGN.md) - Deep architectural breakdown: Data Model, State Machine, Concurrency & Failure Modes, Webhooks, API Key Model, Scope Decisions, and Production Readiness.
-- [`AI_USAGE.md`](./AI_USAGE.md) - Mandatory disclosure of AI tool usage, 3 independent architectural decisions made against AI suggestions, and 1 error corrected.
+- [`AI_USAGE.md`](./AI_USAGE.md) - Mandatory disclosure of AI tool usage, three explained design decisions, and one AI-assisted implementation issue corrected.
 - [`API.md`](./API.md) - API endpoints, request/response schemas, and standard error format.
 - [`migrations/`](./migrations/) - SQL schema migrations.
 - [`src/bin/mock_psp.rs`](./src/bin/mock_psp.rs) - Standalone Mock PSP service simulating card tokens.

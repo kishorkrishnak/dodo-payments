@@ -8,7 +8,7 @@ use crate::errors::AppError;
 // We model 5 explicit lifecycle states:
 // - Draft: Created before it is finalized for collection.
 // - Open: Finalized invoice awaiting payment. Only Open invoices accept payments.
-// - Paid: Terminal state achieved upon successful payment settlement.
+// - Paid: Terminal state achieved after confirmed PSP success.
 // - Void: Terminal state when merchant cancels an invoice.
 // - Uncollectible: Terminal state when merchant designates invoice as bad debt.
 // Reversibility: Paid, Void, and Uncollectible are strictly terminal to preserve financial auditability.

@@ -123,7 +123,7 @@ fn is_non_public_address(address: IpAddr) -> bool {
     }
 }
 
-// Reconciliation endpoint: Allows businesses to reconcile any missed webhook deliveries
+// Event retrieval endpoint for businesses reconciling missed webhook notifications.
 pub async fn list_events(
     State(pool): State<PgPool>,
     Extension(business): Extension<Business>,

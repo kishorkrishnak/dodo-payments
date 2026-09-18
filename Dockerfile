@@ -6,7 +6,7 @@ WORKDIR /usr/src/app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
 # Copy manifests first for dependency caching
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 
 # Create dummy source files to cache dependency compilation
 RUN mkdir src && \

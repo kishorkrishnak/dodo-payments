@@ -352,11 +352,9 @@ impl InvoiceService {
         // Start transaction for pessimistic locking
         let mut tx = self.pool.begin().await?;
 
-        // We use pessimistic row-level locking (`SELECT ... FOR UPDATE`) on the target invoice record.
-        // Why over alternatives:
-        // - In-memory locks fail across multi-node/pod deployments.
-        // - Optimistic concurrency (e.g. version numbers) creates churn and leaves external PSP state ambivalently committed.
-        // - Row-level locking forces concurrent requests for the SAME invoice to wait sequentially.
+        // A row-level lock (`SELECT ... FOR UPDATE`) serializes payment attempts for this invoice
+        // across service replicas. An in-memory lock would not work across replicas, and a
+        // compare-and-swap alone cannot coordinate a PSP call that was already dispatched.
         // A separate key can be rejected with 409 before the PSP call while another
         // payment operation is unresolved. Once the first request settles, later
         // requests observe status == 'paid' and receive 422 without a PSP call.
@@ -795,7 +793,7 @@ impl InvoiceService {
 
         // A process crash after the PSP accepts a charge can leave an in-progress
         // claim behind. After the bounded lease, reclaim it and rely on the same
-        // downstream idempotency key to obtain the original PSP result safely.
+        // downstream idempotency key, assuming the provider honors durable idempotency.
         if record.status == "in_progress" {
             let reclaimed = sqlx::query_scalar::<_, Uuid>(
                 "UPDATE idempotency_records SET updated_at = NOW() WHERE id = $1 AND status = 'in_progress' AND updated_at < NOW() - INTERVAL '30 seconds' RETURNING id",
