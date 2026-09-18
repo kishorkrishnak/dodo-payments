@@ -6,7 +6,7 @@ A minimal, resilient, and production-grade Invoice & Payment Service built with 
 
 ## Demo Video
 
-- **Video Link**: `[DEMO VIDEO LINK - Loom / Google Drive / S3]` *(Insert your unscripted 5–10 minute screen recording link here)*
+- **Video Link**: [Demo recording](https://drive.google.com/file/d/1Vc2AQkyK5RxfWv43II73mBb8HootMYSR/view?usp=sharing)
 - **Video Agenda**:
   1. **Architecture Overview (1–2 min)**: Services (`invoice-service`, `mock-psp`, `postgres`), data model, and transactional outbox flow.
   2. **Live Demo (2–3 min)**: Running `docker compose up`, creating a customer and invoice, paying successfully (`tok_success`), paying with a decline (`tok_card_declined`), and observing webhook deliveries.
